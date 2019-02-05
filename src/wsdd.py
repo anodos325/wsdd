@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3.6
 
 # Implements a target service according to the Web Service Discovery
 # specification.
@@ -27,6 +27,13 @@ import collections
 import xml.etree.ElementTree as ElementTree
 import http.server
 
+# Add extend action to ArgumentParser
+class ExtendAction(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        items = getattr(namespace, self.dest) or []
+        items.extend(values)
+        setattr(namespace, self.dest, items)
 
 # sockaddr C type, with a larger data field to capture IPv6 addresses
 # unfortunately, the structures differ on Linux and FreeBSD
@@ -191,7 +198,6 @@ send_queue = []
 
 args = None
 logger = None
-
 
 # shortcuts for building WSD responses
 def wsd_add_metadata_version(parent):
@@ -522,9 +528,10 @@ def enumerate_host_interfaces():
     if args.ipv6only:
         addrs = [x for x in addrs if x[1] == socket.AF_INET6]
 
-    addrs = [x for x in addrs if not x[0].startswith('lo')]
     if args.interface:
-        addrs = [x for x in addrs if x[0] in args.interface]
+        addrs = [x for x in addrs if x[2] in args.interface]
+
+    addrs = [x for x in addrs if not x[0].startswith('lo')]
 
     return addrs
 
@@ -540,11 +547,12 @@ def parse_args():
     global args, logger
 
     parser = argparse.ArgumentParser()
+    parser.register('action', 'extend', ExtendAction)
 
     parser.add_argument(
-        '-i', '--interface',
+        '-i', '--interface', nargs='+',
         help='interface address to use',
-        action='append', default=[])
+        action='extend', default=[])
     parser.add_argument(
         '-H', '--hoplimit',
         help='hop limit for multicast packets (default = 1)',
