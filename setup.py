@@ -3,7 +3,6 @@ setup(name='wsdd',
       version='1.0',
       packages=['wsdd'],
       package_dir={'wsdd': 'src'},
-      author='Andrew Walker',
-      author_email='awalker@ixsystems.com',
+      author='Steffen Christgau',
       url='https://github.com/freenas/wsdd'
       )
