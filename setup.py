@@ -4,5 +4,6 @@ setup(name='wsdd',
       packages=['wsdd'],
       package_dir={'wsdd': 'src'},
       author='Steffen Christgau',
+      license='MIT',
       url='https://github.com/freenas/wsdd'
-      )
+)
