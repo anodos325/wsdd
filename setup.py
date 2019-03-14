@@ -6,4 +6,4 @@ setup(name='wsdd',
       author='Steffen Christgau',
       license='MIT',
       url='https://github.com/freenas/wsdd'
-      )
+)
