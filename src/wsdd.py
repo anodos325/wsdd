@@ -1,4 +1,4 @@
-#!/usr/bin/env %%PYTHON3_CMD%% 
+#!/usr/bin/env python3 
 
 # Implements a target service according to the Web Service Discovery
 # specification.
