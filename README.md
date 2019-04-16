@@ -13,7 +13,7 @@ local network.
 
 ## Background
 
-With Windows 10 Build 1511, support for SMBv1 and thus NetBIOS device discovery
+With Windows 10 version 1511, support for SMBv1 and thus NetBIOS device discovery
 was disabled by default.  Depending on the actual edition, later versions of
 Windows starting from version 1709 ("Fall Creators Update") do not allow the
 installation of the SMBv1 client anymore.  This causes hosts running Samba not
@@ -43,10 +43,16 @@ init script depends on the Samba service.
 
 No installation steps are required. Just place the wsdd.py file anywhere you
 want to, rename it to wsdd, and run it from there. The init scripts/unit files
-assume that wsdd is installed under /usr/bin/wsdd or /usr/local/bin/wsdd in
+assume that wsdd is installed under `/usr/bin/wsdd` or `/usr/local/bin/wsdd` in
 case of FreeBSD. There are no configuration files. No special privileges are
 required to run wsdd, so it is advisable to run the service as an unprivileged
 user such as _nobody_.
+
+The `etc` directory of the repo contains sample configuration files for
+different init(1) systems, namely FreeBSD's rc.d, Gentoo's openrc, and systemd
+which is used in most contemporary Linux distros. Those files may be used as
+templates for their actual usage. They are likely to require adjustments to the
+actual distribution/installation where they are to be used.
 
 ## Firewall Setup
 
@@ -61,11 +67,12 @@ allowed.
 
  * `-i INTERFACE`, `--interface INTERFACE`
 
-     Specify on which interfaces wsdd will be listing on. If no interfaces are
+     Specify on which interfaces wsdd will be listening on. If no interfaces are
      specified, all interfaces are used. The loop-back interface is never used,
      even when it was explicitly specified. For interfaces with IPv6 addresses,
      only link-local addresses will be used for announcing the host on the
-	 network.
+     network. This option can be provided multiple times in order to use more
+     than interface (but no all).
 
  * `-H HOPLIMIT`, `--hoplimit HOPLIMIT`
 
@@ -91,7 +98,8 @@ allowed.
  * `-n HOSTNAME`, `--hostname HOSTNAME`
 
      Override the host name wsdd uses during discovery. By default the machine's
-     host name is used (look at hostname(1)).
+     host name is used (look at hostname(1)). Only the host name part of a
+     possible FQDN will be used in the default case.
 
  * `-w WORKGROUP`, `--workgroup WORKGROUP`
 
@@ -162,6 +170,29 @@ reliably discovered. The reason appears to be that Windows is not always able
 to connect to the HTTP service for unknown reasons. As a workaround, run wsdd
 with IPv4 only.
 
+## Tunnel/Bridge Interface
+
+If tunnel/bridge interfaces like those created by OpenVPN or Docker exist, they
+may interfere with wsdd if executed without providing an interface that it
+should bind to (so it binds to all). In such cases, the wsdd hosts appears after
+wsdd has been started but it disappears when an update of the Network view in
+Windows Explorer is forced, either by refreshing the view or by a reboot of the
+Windows machine.  To solve this issue, the interface that is connected to the
+network on which the host should be announced needs to be specified with the
+`-i/--interface` option.  This prevents the usage of the tunnel/bridge
+interfaces.
+
+Background: Tunnel/bridge interfaces may cause Resolve requests from Windows
+hosts to be delivered to wsdd multiple times,´i.e. duplicates of such request
+are created. If wsdd receives such a request first from a tunnel/bridge it uses
+the transport address (IP address) of that interface and sends the response via
+unicast. Further duplicates are not processed due to the duplicate message
+detection which is based on message UUIDs. The Windows host which receives the
+response appears to detect a mismatch between the transport address in the
+ResolveMatch message (which is the tunnel/bridge address) and the IP of the
+sending host/interface (LAN IP, e.g.). Subsequently, the wsdd host is ignored by
+Windows.
+
 # Contributing
 
 Contributions are welcome. Please ensure PEP8 compliance when submitting
@@ -177,7 +208,7 @@ Thanks to Jose M. Prieto and his colleague Tobias Waldvogel who wrote the
 mentioned patch for Samba to provide WSD and LLMNR support. A look at their
 patch set made cross-checking the WSD messages easier.
 
-# References
+# References and Further Reading
 
 ## Technical Specification
 
@@ -201,3 +232,14 @@ patch set made cross-checking the WSD messages easier.
    Note: Solutions suggest to go back to SMBv1 protocol which is deprecated! Do not follow this advice.
 
  * [Discussion in Synology Community Forum](https://forum.synology.com/enu/viewtopic.php?f=49&t=106924)
+
+## Other stuff
+
+ * Meanwhile, there is a [C implementation of a WSD daemon](https://github.com/Andy2244/wsdd2), named wsdd2.
+   This one also includes LLMNR which wsdd lacks. However, LLMNR may not be required depending on the actual
+   network/name resolution setup.
+
+ * [OpenWRT includes](https://github.com/openwrt/packages/pull/5563) the above C implementation.
+   So OpenWRT users are unlikely to need an installation of wsdd.
+
+ * [FreeNAS](https://redmine.ixsystems.com/issues/72099) appears to have wsdd included in the distribution.

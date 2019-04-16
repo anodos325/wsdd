@@ -9,7 +9,7 @@
 # see http://specs.xmlsoap.org/ws/2005/04/discovery/ws-discovery.pdf and
 # related documents for details (look at README for more references)
 #
-# (c) Steffen Christgau, 2017
+# (c) Steffen Christgau, 2017-2019
 
 import sys
 import signal
@@ -50,6 +50,7 @@ else:
 
 class if_addrs(ctypes.Structure):
     pass
+
 
 if_addrs._fields_ = [('next', ctypes.POINTER(if_addrs)),
                      ('name', ctypes.c_char_p),
@@ -96,46 +97,56 @@ class MulticastInterface:
             self.listen_address))
 
     def init_v6(self):
-        self.multicast_address = (
-                WSD_MCAST_GRP_V6,
-                WSD_UDP_PORT, 0x575C,
-                socket.if_nametoindex(self.interface))
+        idx = socket.if_nametoindex(self.interface)
+        self.multicast_address = (WSD_MCAST_GRP_V6, WSD_UDP_PORT, 0x575C, idx)
+
         # v6: member_request = { multicast_addr, intf_idx }
         mreq = (
             socket.inet_pton(self.family, WSD_MCAST_GRP_V6) +
-            struct.pack('@I', socket.if_nametoindex(self.interface)))
+            struct.pack('@I', idx))
         self.recv_socket.setsockopt(
             socket.IPPROTO_IPV6, socket.IPV6_JOIN_GROUP, mreq)
         self.recv_socket.setsockopt(
-            socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 0)
-        self.recv_socket.setsockopt(
             socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-        self.recv_socket.bind(('', WSD_UDP_PORT))
 
-        # bind to network interface, i.e. scope
-        self.send_socket.bind(
-            ('::', 0, 0, socket.if_nametoindex(self.interface)))
+        # bind to network interface, i.e. scope and handle OS differences,
+        # see Stevens: Unix Network Programming, Section 21.6, last paragraph
+        try:
+            self.recv_socket.bind((WSD_MCAST_GRP_V6, WSD_UDP_PORT, 0, idx))
+        except OSError:
+            self.recv_socket.bind(('::', 0, 0, idx))
+
+        self.send_socket.setsockopt(
+            socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_LOOP, 0)
         self.send_socket.setsockopt(
             socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_HOPS, args.hoplimit)
+        self.send_socket.setsockopt(
+            socket.IPPROTO_IPV6, socket.IPV6_MULTICAST_IF, idx)
 
         self.transport_address = '[{0}]'.format(self.address)
-        self.listen_address = (
-                self.address,
-                WSD_HTTP_PORT, 0,
-                socket.if_nametoindex(self.interface))
+        self.listen_address = (self.address, WSD_HTTP_PORT, 0, idx)
 
     def init_v4(self):
+        idx = socket.if_nametoindex(self.interface)
         self.multicast_address = (WSD_MCAST_GRP_V4, WSD_UDP_PORT)
-        # v4: member_request = { multicast_addr, intf_addr }
+
+        # v4: member_request (ip_mreqn) = { multicast_addr, intf_addr, idx }
         mreq = (
             socket.inet_pton(self.family, WSD_MCAST_GRP_V4) +
-            socket.inet_pton(self.family, self.address))
+            socket.inet_pton(self.family, self.address) +
+            struct.pack('@I', idx))
         self.recv_socket.setsockopt(
             socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        self.recv_socket.setsockopt(
-            socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
-        self.recv_socket.bind((WSD_MCAST_GRP_V4, WSD_UDP_PORT))
 
+        try:
+            self.recv_socket.bind((WSD_MCAST_GRP_V4, WSD_UDP_PORT))
+        except OSError:
+            self.recv_socket.bind(('', WSD_UDP_PORT))
+
+        self.send_socket.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_IF, mreq)
+        self.send_socket.setsockopt(
+            socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 0)
         self.send_socket.setsockopt(
             socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, args.hoplimit)
 
@@ -273,15 +284,23 @@ def wsd_build_message(to_addr, action_str, request_header, response):
 
 # WSD message type handling
 def wsd_handle_probe(probe):
-    types = probe.find('./wsd:Types', namespaces).text
     scopes = probe.find('./wsd:Scopes', namespaces)
 
     if scopes:
         # THINK: send fault message (see p. 21 in WSD)
-        raise ValueError('scopes are not supported but where probed')
+        logger.warn('Scopes are not supported but were probed ({}).'.format(
+            scopes))
+        return None
 
+    types_elem = probe.find('./wsd:Types', namespaces)
+    if types_elem is None:
+        logger.debug('Probe message lacks wsd:Types element. Ignored.')
+        return None
+
+    types = types_elem.text
     if not types == WSD_TYPE_DEVICE:
-        raise ValueError('unknown discovery type ({0})'.format(types))
+        logger.debug('unknown discovery type ({0}) during probe'.format(types))
+        return None
 
     matches = ElementTree.Element('wsd:ProbeMatches')
     match = ElementTree.SubElement(matches, 'wsd:ProbeMatch')
@@ -295,10 +314,13 @@ def wsd_handle_probe(probe):
 def wsd_handle_resolve(resolve, xaddr):
     addr = resolve.find('./wsa:EndpointReference/wsa:Address', namespaces)
     if addr is None:
-        raise ValueError('invalid resolve request: missing endpoint address')
+        logger.debug('invalid resolve request: missing endpoint address')
+        return None
 
     if not addr.text == args.uuid.urn:
-        raise ValueError('invalid resolve request: address does not match')
+        logger.debug(('invalid resolve request: address ({}) does not match '
+                      'own one ({})').format(addr.text, args.uuid.urn))
+        return None
 
     matches = ElementTree.Element('wsd:ResolveMatches')
     match = ElementTree.SubElement(matches, 'wsd:ResolveMatch')
@@ -366,7 +388,7 @@ def wsd_is_duplicated_msg(msg_id):
     return False
 
 
-def wsd_handle_message(data, interface):
+def wsd_handle_message(data, interface, src_address):
     """
     handle a WSD message that might be received by a MulticastInterface class
     """
@@ -374,32 +396,37 @@ def wsd_handle_message(data, interface):
     header = tree.find('./soap:Header', namespaces)
     msg_id = header.find('./wsa:MessageID', namespaces).text
 
-    if interface:
-        if wsd_is_duplicated_msg(msg_id):
-            logger.debug('known message ({0}): dropping it'.format(msg_id))
-            return None
+    # if message came over multicast interface, check for duplicates
+    if interface and wsd_is_duplicated_msg(msg_id):
+        logger.debug('known message ({0}): dropping it'.format(msg_id))
+        return None
 
     response = None
     action = header.find('./wsa:Action', namespaces).text
     body = tree.find('./soap:Body', namespaces)
+    _, _, action_method = action.rpartition('/')
 
-    logger.info('handling WSD {0} type message ({1})'.format(action, msg_id))
+    if interface:
+        logger.info('{}:{}({}) - - "{} {} UDP" - -'.format(
+            src_address[0], src_address[1], interface.interface,
+            action_method, msg_id
+        ))
+    else:
+        # http logging is already done by according server
+        logger.debug('processing WSD {} message ({})'.format(
+            action_method, msg_id))
+
     logger.debug('incoming message content is {0}'.format(data))
-    # if message came over multicast interface, check for duplicates
     if action == WSD_PROBE:
         probe = body.find('./wsd:Probe', namespaces)
-        return wsd_build_message(
-            WSA_ANON,
-            WSD_PROBE_MATCH,
-            header,
-            wsd_handle_probe(probe))
+        response = wsd_handle_probe(probe)
+        return wsd_build_message(WSA_ANON, WSD_PROBE_MATCH, header,
+                                 response) if response else None
     elif action == WSD_RESOLVE:
         resolve = body.find('./wsd:Resolve', namespaces)
-        return wsd_build_message(
-            WSA_ANON,
-            WSD_RESOLVE_MATCH,
-            header,
-            wsd_handle_resolve(resolve, interface.transport_address))
+        response = wsd_handle_resolve(resolve, interface.transport_address)
+        return wsd_build_message(WSA_ANON, WSD_RESOLVE_MATCH, header,
+                                 response) if response else None
     elif action == WSD_GET:
         return wsd_build_message(
             WSA_ANON,
@@ -418,7 +445,7 @@ class WSDUdpRequestHandler():
 
     def handle_request(self):
         msg, address = self.interface.recv_socket.recvfrom(WSD_MAX_LEN)
-        msg = wsd_handle_message(msg, self.interface)
+        msg = wsd_handle_message(msg, self.interface, address)
         if msg:
             self.enqueue_datagram(msg, address=address)
 
@@ -471,7 +498,7 @@ class WSDUdpRequestHandler():
 class WSDHttpRequestHandler(http.server.BaseHTTPRequestHandler):
     """Class for handling WSD requests coming over HTTP"""
     def log_message(self, fmt, *args):
-        logger.info(fmt % args)
+        logger.info("{} - - ".format(self.address_string()) + fmt % args)
 
     def do_POST(s):
         if s.path != '/' + str(args.uuid):
@@ -483,7 +510,7 @@ class WSDHttpRequestHandler(http.server.BaseHTTPRequestHandler):
         content_length = int(s.headers['Content-Length'])
         body = s.rfile.read(content_length)
 
-        response = wsd_handle_message(body, None)
+        response = wsd_handle_message(body, None, None)
         if response:
             s.send_response(200)
             s.send_header('Content-Type', 'application/soap+xml')
@@ -555,8 +582,8 @@ def parse_args():
         action='extend', default=[])
     parser.add_argument(
         '-H', '--hoplimit',
-        help='hop limit for multicast packets (default = 1)',
-        action='append', default=1)
+        help='hop limit for multicast packets (default = 1)', type=int,
+        default=1)
     parser.add_argument(
         '-u', '--uuid',
         help='UUID for the target device',
@@ -572,7 +599,8 @@ def parse_args():
     parser.add_argument(
         '-n', '--hostname',
         help='override (NetBIOS) hostname to be used (default hostname)',
-        default=socket.gethostname())
+        # use only the local part of a possible FQDN
+        default=socket.gethostname().partition('.')[0])
     parser.add_argument(
         '-w', '--workgroup',
         help='set workgroup name (default WORKGROUP)',
@@ -589,6 +617,10 @@ def parse_args():
         '-6', '--ipv6only',
         help='use IPv6 (default = off)',
         action='store_true')
+    parser.add_argument(
+        '-s', '--shortlog',
+        help='log only level and message',
+        action='store_true')
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -599,8 +631,13 @@ def parse_args():
     else:
         log_level = logging.WARNING
 
-    logging.basicConfig(level=log_level, format=(
-        '%(asctime)s:%(name)s %(levelname)s(pid %(process)d): %(message)s'))
+    if args.shortlog:
+        fmt = '%(levelname)s: %(message)s'
+    else:
+        fmt = ('%(asctime)s:%(name)s %(levelname)s(pid %(process)d): '
+               '%(message)s')
+
+    logging.basicConfig(level=log_level, format=fmt)
     logger = logging.getLogger('wsdd')
 
     if not args.interface:
@@ -630,14 +667,18 @@ def send_outstanding_messages(block=False):
     send_queue.sort(key=lambda x: x[0], reverse=True)
 
     # Emit every message that is "too late". Note that in case the system
-    # time jumps backward, multiple outstanding message which have a
+    # time jumps forward, multiple outstanding message which have a
     # delay between them are sent out without that delay.
     now = time.time()
     while len(send_queue) > 0 and (send_queue[-1][0] <= now or block):
         interface = send_queue[-1][1]
         addr = send_queue[-1][2]
         msg = send_queue[-1][3]
-        interface.send_socket.sendto(msg, addr)
+        try:
+            interface.send_socket.sendto(msg, addr)
+        except Exception as e:
+            logger.error('error while sending packet on {}: {}'.format(
+                interface.interface, e))
 
         del send_queue[-1]
         if block and len(send_queue) > 0:
